@@ -1,0 +1,45 @@
+---
+title: "Getting Raw Matchup Data for Champions League and UEFA Leagues by Country"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+
+```{r}
+library(worldfootballR)
+library(tidyverse)
+```
+
+```{r}
+## Getting data for 2019-2020 UEFA Champions League
+champs = worldfootballR::fb_match_results(country = '', gender='M', season_end_year='2020', non_dom_league_url = 'https://fbref.com/en/comps/8/history/Champions-League-Seasons') %>% write_csv('../data/raw/UEFA_Champions_League_2020_Results_RAW.csv')
+champs %>% head(5)
+```
+```{r leagues of interest}
+country_full = c('Germany', 'Spain', 'England', 'Italy', 'France', 'Belgium', 'Russia', 'Austria', 'Czechia', 'Greece', 'Croatia', 'Netherlands', 'Portugal', 'Serbia','Turkiye','Ukraine')
+country_league = c('Fusball Bundesliga', 'La Liga','Premier League', 'Serie A', 'Ligue 1', 'Belgian Pro League', 'Russian Premier League', 'Austrian Football Bundesliga', 'Czech First League', 'Super League Greece', 'Croatian Football League', 'Eredivise', 'Premeira Liga', 'Serbian SuperLiga', 'Super Lig','Ukrainian Premier League')
+league_url = c('https://fbref.com/en/comps/20/history/Bundesliga-Seasons','https://fbref.com/en/comps/12/history/La-Liga-Seasons','https://fbref.com/en/comps/9/history/Premier-League-Seasons', 'https://fbref.com/en/comps/11/history/Serie-A-Seasons','https://fbref.com/en/comps/13/history/Ligue-1-Seasons', 'https://fbref.com/en/comps/37/history/Belgian-Pro-League-Seasons', 'https://fbref.com/en/comps/30/history/Russian-Premier-League-Seasons', 'https://fbref.com/en/comps/56/history/Austrian-Bundesliga-Seasons', 'https://fbref.com/en/comps/66/history/Czech-First-League-Seasons', 'https://fbref.com/en/comps/27/history/Super-League-Greece-Seasons', 'https://fbref.com/en/comps/63/history/Hrvatska-NL-Seasons', 'https://fbref.com/en/comps/23/history/Eredivisie-Seasons', 'https://fbref.com/en/comps/32/history/Primeira-Liga-Seasons','https://fbref.com/en/comps/54/history/Serbian-SuperLiga-Seasons', 'https://fbref.com/en/comps/26/history/Super-Lig-Seasons', 'https://fbref.com/en/comps/39/history/Ukrainian-Premier-League-Seasons')
+association_pts = c(15.214, 19.571, 22.642, 12.642, 10.583, 7.8, 7.583, 6.2, 6.5, 5.1, 5.75, 8.6, 10.9, 6, 5.5, 5.6)
+country_info = tibble(country = champs %>% pull(Away) %>% str_extract('[a-z]{2}')) %>% count(country) %>% rename(num_teams = n) %>% arrange(desc(num_teams)) %>% mutate(full_name = country_full, league_name = country_league, league_url = league_url, last_association_coef = association_pts) %>% select(country, full_name, num_teams, league_name, league_url, last_association_coef) %>% write_csv('../data/raw/League_Participant_Info_2018-19.csv')
+country_info
+```
+
+```{r}
+## Get league data
+for(i in 1:nrow(country_info)){
+  file_name = str_c("../data/raw/",country_info[i,] %>% pull(full_name), "_", country_info[i,]  %>% pull(league_name) %>% str_replace_all(' ', '_'), "_2018-19.csv")
+  country_code = country_info[i,] %>% pull(country)
+  url = country_info[i,] %>% pull(league_url)
+  worldfootballR::fb_match_results(country = country_code, gender='M', season_end_year='2019', non_dom_league_url = url) %>% write_csv(file_name)
+}
+```
+
+
+```{r}
+read_csv('../data/raw/Germany_Fusball_Bundesliga_2018-19.csv') %>% head(10)
+```
+
+```{r}
+read_csv('../data/raw/Ukraine_Ukrainian_Premier_League_2018-19.csv') %>% head(10)
+```
