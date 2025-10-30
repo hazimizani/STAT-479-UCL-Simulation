@@ -31,22 +31,22 @@ The following data was gathered using the `worldfootballR` library to scrape 201
 
 ```{r echo=FALSE}
 ## Read in all league results
-austria = readr::read_csv('./data/raw/Austria_Austrian_Football_Bundesliga_2018-19.csv', show_col_types = FALSE)
-belgium = readr::read_csv('./data/raw/Belgium_Belgian_Pro_League_2018-19.csv', show_col_types = FALSE)
-croatia = readr::read_csv('./data/raw/Croatia_Croatian_Football_League_2018-19.csv', show_col_types = FALSE)
-czech = readr::read_csv('./data/raw/Czechia_Czech_First_League_2018-19.csv', show_col_types = FALSE)
-england = readr::read_csv('./data/raw/England_Premier_League_2018-19.csv', show_col_types = FALSE)
-france = readr::read_csv('./data/raw/France_Ligue_1_2018-19.csv', show_col_types = FALSE)
-germany = readr::read_csv('./data/raw/Germany_Fusball_Bundesliga_2018-19.csv', show_col_types = FALSE)
-greece = readr::read_csv('./data/raw/Greece_Super_League_Greece_2018-19.csv', show_col_types = FALSE)
-italy = readr::read_csv('./data/raw/Italy_Serie_A_2018-19.csv', show_col_types = FALSE)
-nether = readr::read_csv('./data/raw/Netherlands_Eredivise_2018-19.csv', show_col_types = FALSE)
-portugal = readr::read_csv('./data/raw/Portugal_Premeira_Liga_2018-19.csv', show_col_types = FALSE)
-russia = readr::read_csv('./data/raw/Russia_Russian_Premier_League_2018-19.csv', show_col_types = FALSE)
-serbia = readr::read_csv('./data/raw/Serbia_Serbian_SuperLiga_2018-19.csv', show_col_types = FALSE)
-spain = readr::read_csv('./data/raw/Spain_La_Liga_2018-19.csv', show_col_types = FALSE)
-turkey = readr::read_csv('./data/raw/Turkiye_Super_Lig_2018-19.csv', show_col_types = FALSE)
-ukraine = readr::read_csv('./data/raw/Ukraine_Ukrainian_Premier_League_2018-19.csv', show_col_types = FALSE)
+austria = readr::read_csv('../data/raw/Austria_Austrian_Football_Bundesliga_2018-19.csv', show_col_types = FALSE)
+belgium = readr::read_csv('../data/raw/Belgium_Belgian_Pro_League_2018-19.csv', show_col_types = FALSE)
+croatia = readr::read_csv('../data/raw/Croatia_Croatian_Football_League_2018-19.csv', show_col_types = FALSE)
+czech = readr::read_csv('../data/raw/Czechia_Czech_First_League_2018-19.csv', show_col_types = FALSE)
+england = readr::read_csv('../data/raw/England_Premier_League_2018-19.csv', show_col_types = FALSE)
+france = readr::read_csv('../data/raw/France_Ligue_1_2018-19.csv', show_col_types = FALSE)
+germany = readr::read_csv('../data/raw/Germany_Fusball_Bundesliga_2018-19.csv', show_col_types = FALSE)
+greece = readr::read_csv('../data/raw/Greece_Super_League_Greece_2018-19.csv', show_col_types = FALSE)
+italy = readr::read_csv('../data/raw/Italy_Serie_A_2018-19.csv', show_col_types = FALSE)
+nether = readr::read_csv('../data/raw/Netherlands_Eredivise_2018-19.csv', show_col_types = FALSE)
+portugal = readr::read_csv('../data/raw/Portugal_Premeira_Liga_2018-19.csv', show_col_types = FALSE)
+russia = readr::read_csv('../data/raw/Russia_Russian_Premier_League_2018-19.csv', show_col_types = FALSE)
+serbia = readr::read_csv('../data/raw/Serbia_Serbian_SuperLiga_2018-19.csv', show_col_types = FALSE)
+spain = readr::read_csv('../data/raw/Spain_La_Liga_2018-19.csv', show_col_types = FALSE)
+turkey = readr::read_csv('../data/raw/Turkiye_Super_Lig_2018-19.csv', show_col_types = FALSE)
+ukraine = readr::read_csv('../data/raw/Ukraine_Ukrainian_Premier_League_2018-19.csv', show_col_types = FALSE)
 ```
 
 ## Data Pre-processing
@@ -130,9 +130,11 @@ plot
 #    home.team = factor(home.team, levels = unik_teams),
 #    away.team = factor(away.team,levels = unik_teams))
 no_ties = all %>% filter(HomeGoals != AwayGoals) %>%
+  filter(!str_detect(Round, "play-offs")) %>% ## removing matchups in pro/rel playoffs, otherwise we'll see skewed strengths for those leagues
   mutate(Home_Winner = case_when(HomeGoals > AwayGoals ~ 1, .default=0),
          Opp_Winner = case_when(AwayGoals > HomeGoals ~ 1, .default=0))
-unik_teams <- sort(unique(c(no_ties$Home, no_ties$Away)))
+
+unik_teams = sort(unique(c(no_ties$Home, no_ties$Away)))
 
 results = no_ties %>% 
   rename(home.team = Home, away.team = Away) %>%
@@ -143,7 +145,7 @@ results = no_ties %>%
   dplyr::mutate(
     home.team = factor(home.team, levels = unik_teams),
     away.team = factor(away.team, levels = unik_teams))
-results[sample(1:nrow(results),size=10)]
+results[sample(1:nrow(results),size=10),]
 ```
 With the data now in place and formatted for `BradleyTerry2`, we can begin fitting a Bradley-Terry model to determine latent team strength for all clubs competing in the 2019-20 UEFA Champions League group stage based on their domestic league results.
 
@@ -181,7 +183,7 @@ Given the summary of the Bradley-Terry model and its resulting team strengths, i
 For the sake of our project, we'll only focus on the strengths of the clubs competing in the 2019-20 UEFA Champions League group stages. From this, we see the aforementioned Slavia Prague leading in "domestic strength", along with other dominant teams from smaller nations, like Olympiacos from Greece and Dinamo Zagreb from Croatia. This aligns with our prior assumptions,
 
 ```{r, echo=FALSE}
-uefa = read_csv('./data/raw/UEFA_Champions_League_2020_Results_RAW.csv') 
+uefa = read_csv('../data/raw/UEFA_Champions_League_2020_Results_RAW.csv') 
 uefa = uefa %>% select(Home) %>% mutate(Country = str_extract(uefa$Home, " [a-z]{2,3}$"), Home = str_remove(uefa$Home, " [a-z]{2,3}$")) %>% select(Home, Country, everything())
 champs_w_league_ratings = uefa %>% left_join(lambda_hat %>% rename(Home = team)) %>% unique() %>% replace(is.na(.), 0)
 champs_w_league_ratings %>% arrange(desc(ability))
