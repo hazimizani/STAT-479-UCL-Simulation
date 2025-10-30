@@ -130,7 +130,7 @@ plot
 #    home.team = factor(home.team, levels = unik_teams),
 #    away.team = factor(away.team,levels = unik_teams))
 no_ties = all %>% filter(HomeGoals != AwayGoals) %>%
-  filter(!str_detect(Round, "play-offs")) %>% ## removing matchups in pro/rel playoffs, otherwise we'll see skewed strengths for those leagues
+  filter(!str_detect(Round, "play-offs") | is.na(Round)) %>% ## removing matchups in pro/rel playoffs, otherwise we'll see skewed strengths for those leagues
   mutate(Home_Winner = case_when(HomeGoals > AwayGoals ~ 1, .default=0),
          Opp_Winner = case_when(AwayGoals > HomeGoals ~ 1, .default=0))
 
