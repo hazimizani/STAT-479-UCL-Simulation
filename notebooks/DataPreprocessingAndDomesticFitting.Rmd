@@ -167,7 +167,7 @@ fit <-
   BradleyTerry2::BTm(
     outcome = cbind(home.win, away.win),
     player1 = home.team, player2 = away.team,
-    refcat = "Apollon Smyrnis",
+    refcat = "Yenisey",
     data = results)
 summary(fit)
 ```
