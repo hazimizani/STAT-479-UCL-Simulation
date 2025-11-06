@@ -199,6 +199,7 @@ plot = ggplot2::ggplot(strongest, aes(Home, ability)) +
 plot
 ```
 
+## Fitting Bradley-Terry Model based on Domestic League + UCL Group Stage and Round of 16 results
 
 ```{r}
 uefa_playoff_teams = uefa %>%
@@ -262,23 +263,69 @@ combined_lambda_hat = combined_lambda_hat %>%
 combined_lambda_hat %>% arrange(desc(ability))
 ```
 
+```{r}
+avg_goals = uefa %>%
+  filter(Round %in% c("Group stage", "Round of 16")) %>%
+  mutate(total_goals = HomeGoals + AwayGoals) %>%
+  summarise(avg_goals = mean(total_goals, na.rm = TRUE))
 
+avg_goals
+
+quarters = data.frame(
+  Hi = c("Atalanta", "RB Leipzig", "Barcelona", "Manchester City"),
+  Lo = c("Paris S-G", "Atlético Madrid", "Bayern Munich", "Lyon"),
+  stringsAsFactors = FALSE
+)
+
+quarters
+
+```
+##### Two-legged quarter-finals and semi-finals simulation
+
+In the 19/20 UCL season, the quarter-finals and semi-finals were changed from being 2 legged to just a one leg match. We will simulate the quarter-finals and semi-finals as if it were 2-legged by using the aggregate goals to decide the winner over the two legs. To simulate how many goals a team would score, we use the team's ability based on the Bradley-Terry model and the average goal scored over the UCL Group Stage and Round of 16
 ```{r}
 # compute win probabilities
 possible_matchups = quarters %>%
-  dplyr::left_join(combined_lambda_hat %>% select(team, ability),
+  dplyr::left_join(combined_lambda_hat %>% dplyr::select(team, ability),
                    by = c("Hi" = "team")) %>%
   dplyr::rename(Hi_ability = ability) %>%
-  dplyr::left_join(combined_lambda_hat %>% select(team, ability),
+  dplyr::left_join(combined_lambda_hat %>% dplyr::select(team, ability),
                    by = c("Lo" = "team")) %>%
   dplyr::rename(Lo_ability = ability) %>%
-  dplyr::mutate(prob = exp(Hi_ability) / (exp(Hi_ability) + exp(Lo_ability)))
+  dplyr::mutate(
+    # expected goal rate scaling based on relative Bradley-Terry abilities
+    Hi_lambda = exp(Hi_ability) / (exp(Hi_ability) + exp(Lo_ability)) * 3.205357,
+    Lo_lambda = exp(Lo_ability) / (exp(Hi_ability) + exp(Lo_ability)) * 3.205357
+  )
 
-# helper function for 2-leg tie
-simulate_two_leg = function(prob) {
-  leg1 = rbinom(1, 1, prob)
-  leg2 = rbinom(1, 1, prob)
-  return(as.numeric((leg1 + leg2) >= 1))
+# Helper function for 2-leg tie using aggregate goals
+simulate_two_leg_goals = function(ability_hi, ability_lo, avg_goals = 3.205357) {
+  # Convert BT abilities into expected goal rates per match
+  lambda_hi = exp(ability_hi) / (exp(ability_hi) + exp(ability_lo)) * avg_goals
+  lambda_lo = exp(ability_lo) / (exp(ability_hi) + exp(ability_lo)) * avg_goals
+
+  # Simulate goals for each of the two legs 
+  # Each team plays two matches, goals ~ Poisson distributed
+  leg1_hi = rpois(1, lambda_hi)
+  leg1_lo = rpois(1, lambda_lo)
+  leg2_hi = rpois(1, lambda_hi)
+  leg2_lo = rpois(1, lambda_lo)
+
+  # Aggregate total goals across both legs 
+  total_hi = leg1_hi + leg2_hi
+  total_lo = leg1_lo + leg2_lo
+
+  # Decide winner based on aggregate goals 
+  if (total_hi > total_lo) {
+    return(1)  # Hi team advances
+  } else if (total_lo > total_hi) {
+    return(0)  # Lo team advances
+  } else {
+    # Tie after two legs
+    # Compute win probability based on relative abilities
+    prob_hi_wins_tiebreak = exp(ability_hi) / (exp(ability_hi) + exp(ability_lo))
+    return(rbinom(1, 1, prob_hi_wins_tiebreak))  # weighted shootout
+  }
 }
 
 possible_matchups
@@ -287,7 +334,7 @@ possible_matchups
 ```{r}
 n_sims = 10000
 
-results = data.frame(
+alt_results = data.frame(
   SF1_Winner = rep(NA, times = n_sims),
   SF2_Winner = rep(NA, times = n_sims),
   Finals_Hi = rep(NA, times = n_sims),
@@ -298,11 +345,16 @@ results = data.frame(
 for (r in 1:n_sims) {
   set.seed(321 + r)
   
-  # QUARTER-FINALS
+  # Quarter-Finals
   qf_winners = rep(NA, nrow(possible_matchups))
   
   for (i in 1:nrow(possible_matchups)) {
-    result = simulate_two_leg(possible_matchups$prob[i])
+    result = simulate_two_leg_goals(
+      ability_hi = possible_matchups$Hi_ability[i],
+      ability_lo = possible_matchups$Lo_ability[i],
+      avg_goals = 3.205357
+    )
+    
     if (result == 1) {
       qf_winners[i] = possible_matchups$Hi[i]
     } else {
@@ -310,7 +362,7 @@ for (r in 1:n_sims) {
     }
   }
   
-  # SEMI-FINALS 
+  # Semi-Finals
   semis = data.frame(
     Hi = c(qf_winners[1], qf_winners[3]),
     Lo = c(qf_winners[2], qf_winners[4])
@@ -320,12 +372,16 @@ for (r in 1:n_sims) {
     dplyr::rename(Hi_ability = ability) %>%
     dplyr::left_join(combined_lambda_hat %>% dplyr::select(team, ability),
                      by = c("Lo" = "team")) %>%
-    dplyr::rename(Lo_ability = ability) %>%
-    dplyr::mutate(prob = exp(Hi_ability) / (exp(Hi_ability) + exp(Lo_ability)))
+    dplyr::rename(Lo_ability = ability)
   
   sf_winners = rep(NA, nrow(semis))
   for (i in 1:nrow(semis)) {
-    result = simulate_two_leg(semis$prob[i])
+    result = simulate_two_leg_goals(
+      ability_hi = semis$Hi_ability[i],
+      ability_lo = semis$Lo_ability[i],
+      avg_goals = 3.205357
+    )
+    
     if (result == 1) {
       sf_winners[i] = semis$Hi[i]
     } else {
@@ -333,44 +389,40 @@ for (r in 1:n_sims) {
     }
   }
   
-  results[r, c("SF1_Winner", "SF2_Winner")] <- sf_winners
+  alt_results[r, c("SF1_Winner", "SF2_Winner")] = sf_winners
   
-  # FINAL
-  finals = data.frame(Team1 = sf_winners[1], Team2 = sf_winners[2]) %>%
-    dplyr::left_join(
-      combined_lambda_hat %>%
-        dplyr::rename(Team1 = team, Team1_Ability = ability),
-      by = "Team1"
-    ) %>%
-    dplyr::left_join(
-      combined_lambda_hat %>%
-        dplyr::rename(Team2 = team, Team2_Ability = ability),
-      by = "Team2"
-    ) %>%
+  # Finals (single leg match)
+  finals = data.frame(
+    Team1 = sf_winners[1],
+    Team2 = sf_winners[2]
+  ) %>%
+    dplyr::left_join(combined_lambda_hat %>% dplyr::rename(Team1 = team, Team1_ability = ability),
+                     by = "Team1") %>%
+    dplyr::left_join(combined_lambda_hat %>% dplyr::rename(Team2 = team, Team2_ability = ability),
+                     by = "Team2") %>%
     dplyr::mutate(
-      Hi = ifelse(Team1_Ability > Team2_Ability, Team1, Team2),
-      Lo = ifelse(Team1_Ability > Team2_Ability, Team2, Team1),
-      Hi_ability = pmax(Team1_Ability, Team2_Ability),
-      Lo_ability = pmin(Team1_Ability, Team2_Ability),
+      Hi = ifelse(Team1_ability > Team2_ability, Team1, Team2),
+      Lo = ifelse(Team1_ability > Team2_ability, Team2, Team1),
+      Hi_ability = pmax(Team1_ability, Team2_ability),
+      Lo_ability = pmin(Team1_ability, Team2_ability),
       prob = exp(Hi_ability) / (exp(Hi_ability) + exp(Lo_ability))
-    ) %>%
-    dplyr::select(Hi, Lo, prob)
+    )
   
-  results[r, "Finals_Hi"] = finals$Hi[1]
-  results[r, "Finals_Lo"] = finals$Lo[1]
+  alt_results[r, "Finals_Hi"] = finals$Hi[1]
+  alt_results[r, "Finals_Lo"] = finals$Lo[1]
   
-  if (is.na(finals$prob[1])) finals$prob[1] = 0.5
+  # Simulate single-leg final based on ability-derived probability
+  final_outcome = rbinom(n = 1, size = 1, prob = finals$prob[1])
   
-  final_outcome = rbinom(1, 1, finals$prob[1])
   if (final_outcome == 1) {
-    results[r, "Champion"] = finals$Hi[1]
+    alt_results[r, "Champion"] = finals$Hi[1]
   } else {
-    results[r, "Champion"] = finals$Lo[1]
+    alt_results[r, "Champion"] = finals$Lo[1]
   }
 }
 
-# FINAL RESULTS 
-champions = results %>%
+# Results
+champions = alt_results %>%
   dplyr::count(Champion, sort = TRUE) %>%
   dplyr::mutate(Prob = n / n_sims)
 
