@@ -21,6 +21,7 @@ require(devtools, quietly = TRUE)
 require(tidyverse, quietly = TRUE)
 # devtools::install_github("hturner/BradleyTerry2")
 require(BradleyTerry2, quietly = TRUE)
+library(scales)
 #devtools::install_github("hrbrmstr/hrbrthemes", quiet = TRUE)
 #require(hrbrthemes, quietly = TRUE)
 ```
@@ -109,7 +110,7 @@ all %>% head(10)
 With the leagues all concatenated together, we can check to see the distribution of the complete DataFrame's members.
 
 ```{r, echo=FALSE}
-set.seed(439)
+set.seed(25)
 all[sample(1:nrow(all), size=10),]
 ```
 
@@ -222,6 +223,95 @@ plot = ggplot2::ggplot(strongest, aes(Home, ability)) +
 plot
 ```
 
+```{r}
+ucl = readr::read_csv('../data/raw/UEFA_Champions_League_2020_Results_RAW.csv', show_col_types = FALSE)
+ucl = ucl %>%  
+  mutate(
+    Country_Away = str_extract(Away, "^[A-Za-z]{2,3}(?=\\s)"),
+    Country_Home = str_extract(ucl$Home, " [a-z]{2,3}$")
+  ) %>%
+  mutate(
+    Home = stringr::str_remove(Home, " [a-z]{2,3}$"),
+    Away = str_remove(Away, "^[A-Za-z]{2,3}\\s+")
+  )
+
+ucl_group <- ucl %>%
+  filter(Round == "Group stage", HomeGoals != AwayGoals)
+
+ucl_teams <- sort(unique(c(ucl_group$Home, ucl_group$Away)))
+
+domestic_restricted <- all %>%
+  mutate(Home = as.character(Home), Away = as.character(Away)) %>%
+  filter(Home %in% ucl_teams | Away %in% ucl_teams) %>%
+  filter(HomeGoals != AwayGoals) %>%
+  filter(!stringr::str_detect(Round, "play-offs") | is.na(Round))
+
+
+bt_dom <- domestic_restricted %>%
+  transmute(
+    home.team = Home,
+    away.team = Away,
+    home.win  = as.integer(HomeGoals > AwayGoals),
+    away.win  = as.integer(AwayGoals > HomeGoals),
+    Competition = "Domestic"
+  )
+
+bt_ucl <- ucl_group %>%
+  transmute(
+    home.team = Home,
+    away.team = Away,
+    home.win  = as.integer(HomeGoals > AwayGoals),
+    away.win  = as.integer(AwayGoals > HomeGoals),
+    Competition = "UCL"
+  )
+
+bt_all <- bind_rows(bt_dom, bt_ucl) %>%
+  mutate(w = ifelse(Competition == "UCL", wt_ucl, wt_dom))
+
+unik_teams_all <- sort(unique(c(bt_all$home.team, bt_all$away.team)))
+bt_all <- bt_all %>%
+  mutate(
+    home.team = factor(home.team, levels = unik_teams_all),
+    away.team = factor(away.team, levels = unik_teams_all)
+  )
+
+
+```
+
+```{r}
+deg <- table(c(as.character(bt_all$home.team), as.character(bt_all$away.team)))
+refcat_combined <- names(sort(deg, decreasing = FALSE))[1]
+
+# 6) Fit the weighted BT model
+fit_combined <- BradleyTerry2::BTm(
+  outcome = cbind(home.win, away.win),
+  player1 = home.team,
+  player2 = away.team,
+  refcat  = refcat_combined,
+  data    = bt_all,
+  weights = w
+)
+
+lambda_hat_combined <- BradleyTerry2::BTabilities(fit_combined) %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("team") %>%
+  arrange(desc(ability))
+
+lambda_hat_combined
+```
+
+```{r}
+
+lambda_hat_combined %>% 
+  slice_max(ability, n = 10) %>%
+  ggplot(aes(reorder(team, ability), ability)) +
+  geom_col() + coord_flip() +
+  labs(title="Top BT Strengths (Domestic+UCL)", x=NULL, y="Ability (β)") +
+  theme_minimal()
+
+
+```
+
 Since the round of 16 for the Champions League Tournament had 2 legs before COVID officially shut down the tournament, we need to simulate both legs of the contest. However our Bradley-Terry model has limitations where it doesn't predict score just the overall winner. For 2 leg contests, this shows a problem where aggregate score decides the winner. If both teams win one game, the Bradley Terry model doesn't know who wins the whole round. Also, if one team wins marginally, and the other team wins by a lot, it still looks like 1 win and 1 loss to the Bradley Terry model. This is the reason that we want to get the scores of the matchups, so we shift for this round specifically to a Markov Chain model modeling states of the games using the Bradley-Terry strengths to simulate goal scores and state changes.
 
 ```{r}
@@ -229,7 +319,7 @@ total_gpm <- 2.7   # constant, estimated how many goals are scored per game
 beta      <- 0.9   # how strongly BT ability difference tilts scoring share
 hfa       <- 0.28  # home-field advantage in the scoring-share logit
 et_scale  <- 0.75  # scoring slows in extra time
-set.seed(479)
+set.seed(25)
 
 inv_logit <- function(x) 1/(1+exp(-x))
 # ---- normalize and safely match team names to lambda_hat$team ----
@@ -239,7 +329,7 @@ normalize_name <- function(x) {
   gsub("[^a-z0-9]+", "", y)
 }
 
-lambda_vec_raw <- setNames(lambda_hat$ability, lambda_hat$team)
+lambda_vec_raw <- setNames(lambda_hat_combined$ability, lambda_hat_combined$team)
 teams_raw  <- names(lambda_vec_raw)
 teams_norm <- normalize_name(teams_raw)
 
@@ -281,7 +371,7 @@ r16_ties <- tibble::tribble(
   "R16-8", "Lyon",              "Juventus"
 )
 
-# show how each R16 name maps into your lambda_hat list
+# show how each R16 name maps into your lambda_hat_combined list
 r16_name_map <- unique(rbind(
   do.call(rbind, lapply(r16_ties$home_first_leg, map_team)),
   do.call(rbind, lapply(r16_ties$away_first_leg, map_team))
@@ -400,7 +490,7 @@ simulate_r16_mc <- function(N=5000, away_goals_rule=TRUE) {
       mean_agg_A = sumAggA / N,
       mean_agg_B = sumAggB / N
     )
-  }) %>% dplyr::arrange(tie_id)
+  }) %>% arrange(tie_id)
 }
 ```
 
@@ -412,17 +502,183 @@ print(r16_results)
 
 ```
 
-The results show that Atalanta is slightly favored over Valencia, but it is pretty much a tossup at p = 0.52.
+```{r}
+r16_long <- r16_results %>%
+  transmute(
+    tie_id,
+    team_A, team_B,
+    p_A = p_adv_A,
+    p_B = p_adv_B
+  ) %>%
+  pivot_longer(cols = c(team_A, team_B),
+               names_to = "side", values_to = "team") %>%
+  mutate(prob = ifelse(side == "team_A", p_A, p_B)) %>%
+  mutate(prob_cap50 = pmin(prob, 0.5),
+         label_full = sprintf("%.1f%%", 100 * prob))
 
-PSG, Liverpool, Barcelona, Manchester city, Bayern Munich and Juventus are heavily favored in their matchups with around an 80 percent chance to win.
+# Plot: two bars per tie, capped at 50%
+ggplot(r16_long, aes(x = tie_id, y = prob_cap50, fill = team)) +
+  geom_col(position = position_dodge(width = 0.65), width = 0.6) +
+  geom_text(aes(label = label_full),
+            position = position_dodge(width = 0.65),
+            vjust = -0.25, size = 3.2) +
+  scale_y_continuous(labels = percent_format(accuracy = 1),
+                     limits = c(0, 0.5), breaks = seq(0, 0.5, by = 0.1)) +
+  labs(
+    title = "R16: Win Probabilities (Each Team Capped at 50%)",
+    x = "Tie",
+    y = "Probability (capped at 50%)",
+    fill = "Team"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
 
-RB Leipzig is slightly favored in their matchup with a 60 percent chance of winning.
+```
 
-This aligns as in real life, Bayern, Manchester City, Barcelona, and PSG all won their matchups.
+```{r}
 
-Leipzig and and Atalanta also won their matchups.
+set.seed(25) 
 
-However, Liverpool was Upset along with Juventus.
+winners_stochastic <- r16_results %>% 
+  mutate(
+    A_wins = runif(n()) < p_adv_A,
+    winner = ifelse(A_wins, team_A, team_B),
+    A_wins = NULL
+  )
+
+winners_stochastic
+```
+
+```{r}
+
+qf_ties <- tribble(
+  ~tie_id, ~team_A,               ~team_B,
+  "QF-1",  "Atalanta",            "Paris S-G",
+  "QF-2",  "RB Leipzig",          "Atletico Madrid",
+  "QF-3",  "Barcelona",           "Bayern Munich",
+  "QF-4",  "Manchester City",     "Lyon"
+)
+
+simulate_qf_mc <- function(N = 5000) {
+  purrr::map_dfr(seq_len(nrow(qf_ties)), function(i) {
+    A <- qf_ties$team_A[i]
+    B <- qf_ties$team_B[i]
+    winsA <- 0L
+    sumGoalsA <- 0L
+    sumGoalsB <- 0L
+
+    for (k in 1:N) {
+      out <- sim_match_markov(Home = A, Away = B, neutral = TRUE, allow_et = TRUE)
+      # out$winner is "home"/"away" per your function
+      the_winner <- if (out$winner == "home") A else B
+      if (the_winner == A) winsA <- winsA + 1L
+      sumGoalsA <- sumGoalsA + out$gH
+      sumGoalsB <- sumGoalsB + out$gA
+    }
+
+    pA <- winsA / N
+    tibble::tibble(
+      tie_id     = qf_ties$tie_id[i],
+      team_A     = A,
+      team_B     = B,
+      p_adv_A    = pA,
+      p_adv_B    = 1 - pA,
+      se_A       = sqrt(pA * (1 - pA) / N),
+      mean_goals_A = sumGoalsA / N,
+      mean_goals_B = sumGoalsB / N
+    )
+  }) %>% arrange(tie_id)
+}
+
+set.seed(25)
+N <- 5000
+qf_results <- simulate_qf_mc(N)
+print(qf_results)
+
+qf_stochastic <- qf_results %>%
+  mutate(
+    A_wins = runif(n()) < p_adv_A,
+    winner_stochastic = ifelse(A_wins, team_A, team_B)
+  ) %>%
+  select(tie_id, team_A, team_B, p_adv_A, p_adv_B, winner_stochastic)
+
+qf_stochastic
+```
+
+```{r}
+
+sf_ties <- tribble(
+  ~tie_id, ~team_A,           ~team_B,
+  "QF-1",  "Lyon",            "Bayern Munich",
+  "QF-2",  "RB Leipzig",      "Paris S-G",
+)
+
+simulate_round_mc <- function(ties_df, N = 5000) {
+  purrr::map_dfr(seq_len(nrow(ties_df)), function(i) {
+    A <- ties_df$team_A[i]
+    B <- ties_df$team_B[i]
+    winsA <- 0L
+    sumGoalsA <- 0L
+    sumGoalsB <- 0L
+
+    for (k in 1:N) {
+      out <- sim_match_markov(Home = A, Away = B, neutral = TRUE, allow_et = TRUE)
+      the_winner <- if (out$winner == "home") A else B
+      if (the_winner == A) winsA <- winsA + 1L
+      sumGoalsA <- sumGoalsA + out$gH
+      sumGoalsB <- sumGoalsB + out$gA
+    }
+
+    pA <- winsA / N
+    tibble::tibble(
+      tie_id        = ties_df$tie_id[i],
+      team_A        = A,
+      team_B        = B,
+      p_adv_A       = pA,
+      p_adv_B       = 1 - pA,
+      se_A          = sqrt(pA * (1 - pA) / N),
+      mean_goals_A  = sumGoalsA / N,
+      mean_goals_B  = sumGoalsB / N
+    )
+  }) %>% arrange(tie_id)
+}
+set.seed(25)           # reproducible
+sf_results <- simulate_round_mc(sf_ties, N = 5000)
+print(sf_results)
+
+set.seed(25)
+sf_stochastic <- sf_results %>%
+  mutate(
+    A_wins = runif(n()) < p_adv_A,
+    winner_stochastic = ifelse(A_wins, team_A, team_B),
+    A_wins = NULL
+  ) %>%
+  select(tie_id, team_A, team_B, p_adv_A, p_adv_B, winner_stochastic)
+
+sf_stochastic
+
+```
+
+```{r}
+final_ties <- tribble(
+  ~tie_id, ~team_A,           ~team_B,
+  "F-1",  "Paris S-G",            "Bayern Munich"
+)
+
+set.seed(25)           
+f_results <- simulate_round_mc(final_ties, N = 5000)
+print(f_results)
+
+f_stochastic <- f_results %>%
+  mutate(
+    A_wins = runif(n()) < p_adv_A,
+    winner_stochastic = ifelse(A_wins, team_A, team_B),
+    A_wins = NULL
+  ) %>%
+  select(tie_id, team_A, team_B, p_adv_A, p_adv_B, winner_stochastic)
+
+f_stochastic
+```
 
 ## Endnotes {#endnotes}
 

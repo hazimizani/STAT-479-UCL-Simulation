@@ -197,8 +197,11 @@ plot = ggplot2::ggplot(strongest, aes(Home, ability)) +
   labs(title = "Top 5 Teams by 2018-19 Domestic Performance Strength", x = "Club", y = "Team Strength λ") + 
   hrbrthemes::theme_ipsum(grid="Y")
 plot
+
+ggsave("domestic.png", dpi = 300)
 ```
 
+## Fitting Bradley-Terry Model based on Domestic League + UCL Group Stage and Round of 16 results
 
 ```{r}
 uefa_playoff_teams = uefa %>%
@@ -209,9 +212,16 @@ uefa_playoff_teams
 ```
 
 ```{r}
+uefa_group_ro16 = uefa %>% filter(Round %in% c("Group stage", "Round of 16"))
+
+uefa_group_ro16
+```
+
+
+```{r}
 all_combined = bind_rows(
   all %>% mutate(Competition = "Domestic"),
-  uefa %>% mutate(Competition = "UCL")
+  uefa_group_ro16 %>% mutate(Competition = "UCL")
 )
 
 no_ties_combined = all_combined %>%
@@ -239,6 +249,7 @@ fit_all = BradleyTerry2::BTm(
 )
 
 ```
+
 ```{r}
 # extract team ability estimates from unified model
 combined_lambda_hat = as.data.frame(BradleyTerry2::BTabilities(fit_all))
@@ -249,6 +260,14 @@ combined_lambda_hat = combined_lambda_hat %>%
 head(combined_lambda_hat %>% arrange(desc(ability)))
 
 ```
+
+```{r}
+plot = ggplot2::ggplot(combined_lambda_hat %>% arrange(desc(ability)) %>% head(5), aes(reorder(team, -ability), ability)) + 
+  ggplot2::geom_col() + 
+  labs(title = "Top 5 Teams by UCL 2019-2020 Group Stage + RO16 Performance Strength", x = "Club", y = "Team Strength λ") 
+plot
+```
+
 
 ```{r}
 uefa_playoff_teams= c(
@@ -262,23 +281,105 @@ combined_lambda_hat = combined_lambda_hat %>%
 combined_lambda_hat %>% arrange(desc(ability))
 ```
 
+```{r}
+strength_plot = combined_lambda_hat %>%
+  arrange(desc(ability)) %>%
+  ggplot(aes(x = reorder(team, ability), y = ability)) +
+  geom_col(fill = "#1f78b4", width = 0.7) +
+  geom_text(aes(label = round(ability, 2)),
+            hjust = -0.1, size = 4, color = "black") +
+  coord_flip(clip = "off") +
+  scale_y_continuous(
+    expand = expansion(mult = c(0, 0.1))
+  ) +
+  labs(
+    title = "Playoff Teams Strengths",
+    subtitle = "Bradley–Terry Model Estimated Team Abilities (λ)",
+    x = "Team",
+    y = "Ability (λ)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(size = 11, color = "gray30"),
+    axis.text.y = element_text(face = "bold"),
+    axis.title.y = element_text(vjust = 1),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.margin = margin(10, 40, 10, 10)
+  )
 
+ggsave("playoffteam_strengths.png", width = 8, height = 5, dpi = 300)
+strength_plot
+
+```
+
+
+```{r}
+avg_goals = uefa %>%
+  filter(Round %in% c("Group stage", "Round of 16")) %>%
+  mutate(total_goals = HomeGoals + AwayGoals) %>%
+  summarise(avg_goals = mean(total_goals, na.rm = TRUE))
+
+avg_goals
+
+quarters = data.frame(
+  Hi = c("Atalanta", "RB Leipzig", "Barcelona", "Manchester City"),
+  Lo = c("Paris S-G", "Atlético Madrid", "Bayern Munich", "Lyon"),
+  stringsAsFactors = FALSE
+)
+
+quarters
+
+```
+
+
+##### Two-legged quarter-finals and semi-finals simulation
+
+In the 19/20 UCL season, the quarter-finals and semi-finals were changed from being 2 legged to just a one leg match. We will simulate the quarter-finals and semi-finals as if it were 2-legged by using the aggregate goals to decide the winner over the two legs. To simulate how many goals a team would score, we use the team's ability based on the Bradley-Terry model and the average goal scored over the UCL Group Stage and Round of 16
 ```{r}
 # compute win probabilities
 possible_matchups = quarters %>%
-  dplyr::left_join(combined_lambda_hat %>% select(team, ability),
+  dplyr::left_join(combined_lambda_hat %>% dplyr::select(team, ability),
                    by = c("Hi" = "team")) %>%
   dplyr::rename(Hi_ability = ability) %>%
-  dplyr::left_join(combined_lambda_hat %>% select(team, ability),
+  dplyr::left_join(combined_lambda_hat %>% dplyr::select(team, ability),
                    by = c("Lo" = "team")) %>%
   dplyr::rename(Lo_ability = ability) %>%
-  dplyr::mutate(prob = exp(Hi_ability) / (exp(Hi_ability) + exp(Lo_ability)))
+  dplyr::mutate(
+    # expected goal rate scaling based on relative Bradley-Terry abilities
+    Hi_lambda = exp(Hi_ability) / (exp(Hi_ability) + exp(Lo_ability)) * 3.205357,
+    Lo_lambda = exp(Lo_ability) / (exp(Hi_ability) + exp(Lo_ability)) * 3.205357
+  )
 
-# helper function for 2-leg tie
-simulate_two_leg = function(prob) {
-  leg1 = rbinom(1, 1, prob)
-  leg2 = rbinom(1, 1, prob)
-  return(as.numeric((leg1 + leg2) >= 1))
+# Helper function for 2-leg tie using aggregate goals
+simulate_two_leg_goals = function(ability_hi, ability_lo, avg_goals = 3.205357) {
+  # Convert BT abilities into expected goal rates per match
+  lambda_hi = exp(ability_hi) / (exp(ability_hi) + exp(ability_lo)) * avg_goals
+  lambda_lo = exp(ability_lo) / (exp(ability_hi) + exp(ability_lo)) * avg_goals
+
+  # Simulate goals for each of the two legs 
+  # Each team plays two matches, goals ~ Poisson distributed
+  leg1_hi = rpois(1, lambda_hi)
+  leg1_lo = rpois(1, lambda_lo)
+  leg2_hi = rpois(1, lambda_hi)
+  leg2_lo = rpois(1, lambda_lo)
+
+  # Aggregate total goals across both legs 
+  total_hi = leg1_hi + leg2_hi
+  total_lo = leg1_lo + leg2_lo
+
+  # Decide winner based on aggregate goals 
+  if (total_hi > total_lo) {
+    return(1)  # Hi team advances
+  } else if (total_lo > total_hi) {
+    return(0)  # Lo team advances
+  } else {
+    # Tie after two legs
+    # Compute win probability based on relative abilities
+    prob_hi_wins_tiebreak = exp(ability_hi) / (exp(ability_hi) + exp(ability_lo))
+    return(rbinom(1, 1, prob_hi_wins_tiebreak))  # weighted shootout
+  }
 }
 
 possible_matchups
@@ -287,30 +388,45 @@ possible_matchups
 ```{r}
 n_sims = 10000
 
-results = data.frame(
-  SF1_Winner = rep(NA, times = n_sims),
-  SF2_Winner = rep(NA, times = n_sims),
-  Finals_Hi = rep(NA, times = n_sims),
-  Finals_Lo = rep(NA, times = n_sims),
-  Champion = rep(NA, times = n_sims)
+alt_results = data.frame(
+  QF_Match1 = rep(NA, n_sims),
+  QF_Match2 = rep(NA, n_sims),
+  QF_Match3 = rep(NA, n_sims),
+  QF_Match4 = rep(NA, n_sims),
+  QF_Winner1 = rep(NA, n_sims),
+  QF_Winner2 = rep(NA, n_sims),
+  QF_Winner3 = rep(NA, n_sims),
+  QF_Winner4 = rep(NA, n_sims),
+  SF_Match1 = rep(NA, n_sims),
+  SF_Match2 = rep(NA, n_sims),
+  SF1_Winner = rep(NA, n_sims),
+  SF2_Winner = rep(NA, n_sims),
+  Finals_Hi = rep(NA, n_sims),
+  Finals_Lo = rep(NA, n_sims),
+  Champion = rep(NA, n_sims)
 )
 
 for (r in 1:n_sims) {
   set.seed(321 + r)
   
-  # QUARTER-FINALS
+  # qf
   qf_winners = rep(NA, nrow(possible_matchups))
   
   for (i in 1:nrow(possible_matchups)) {
-    result = simulate_two_leg(possible_matchups$prob[i])
-    if (result == 1) {
-      qf_winners[i] = possible_matchups$Hi[i]
-    } else {
-      qf_winners[i] = possible_matchups$Lo[i]
-    }
+    result = simulate_two_leg_goals(
+      ability_hi = possible_matchups$Hi_ability[i],
+      ability_lo = possible_matchups$Lo_ability[i],
+      avg_goals = 3.205357
+    )
+    qf_winners[i] = ifelse(result == 1, possible_matchups$Hi[i], possible_matchups$Lo[i])
+    
+    # store QF matchups
+    alt_results[r, paste0("QF_Match", i)] =
+      paste(possible_matchups$Hi[i], "vs", possible_matchups$Lo[i])
+    alt_results[r, paste0("QF_Winner", i)] = qf_winners[i]
   }
   
-  # SEMI-FINALS 
+  # sf
   semis = data.frame(
     Hi = c(qf_winners[1], qf_winners[3]),
     Lo = c(qf_winners[2], qf_winners[4])
@@ -320,31 +436,35 @@ for (r in 1:n_sims) {
     dplyr::rename(Hi_ability = ability) %>%
     dplyr::left_join(combined_lambda_hat %>% dplyr::select(team, ability),
                      by = c("Lo" = "team")) %>%
-    dplyr::rename(Lo_ability = ability) %>%
-    dplyr::mutate(prob = exp(Hi_ability) / (exp(Hi_ability) + exp(Lo_ability)))
+    dplyr::rename(Lo_ability = ability)
   
   sf_winners = rep(NA, nrow(semis))
   for (i in 1:nrow(semis)) {
-    result = simulate_two_leg(semis$prob[i])
-    if (result == 1) {
-      sf_winners[i] = semis$Hi[i]
-    } else {
-      sf_winners[i] = semis$Lo[i]
-    }
+    result = simulate_two_leg_goals(
+      ability_hi = semis$Hi_ability[i],
+      ability_lo = semis$Lo_ability[i],
+      avg_goals = 3.205357
+    )
+    sf_winners[i] = ifelse(result == 1, semis$Hi[i], semis$Lo[i])
+    
+    # store SF matchups
+    alt_results[r, paste0("SF_Match", i)] =
+      paste(semis$Hi[i], "vs", semis$Lo[i])
   }
   
-  results[r, c("SF1_Winner", "SF2_Winner")] <- sf_winners
+  alt_results[r, c("SF1_Winner", "SF2_Winner")] = sf_winners
   
-  # FINAL
-  finals = data.frame(Team1 = sf_winners[1], Team2 = sf_winners[2]) %>%
+  # finals
+  finals = data.frame(
+    Team1 = sf_winners[1],
+    Team2 = sf_winners[2]
+  ) %>%
     dplyr::left_join(
-      combined_lambda_hat %>%
-        dplyr::rename(Team1 = team, Team1_Ability = ability),
+      combined_lambda_hat %>% dplyr::rename(Team1 = team, Team1_Ability = ability),
       by = "Team1"
     ) %>%
     dplyr::left_join(
-      combined_lambda_hat %>%
-        dplyr::rename(Team2 = team, Team2_Ability = ability),
+      combined_lambda_hat %>% dplyr::rename(Team2 = team, Team2_Ability = ability),
       by = "Team2"
     ) %>%
     dplyr::mutate(
@@ -356,27 +476,142 @@ for (r in 1:n_sims) {
     ) %>%
     dplyr::select(Hi, Lo, prob)
   
-  results[r, "Finals_Hi"] = finals$Hi[1]
-  results[r, "Finals_Lo"] = finals$Lo[1]
+  alt_results[r, "Finals_Hi"] = finals$Hi[1]
+  alt_results[r, "Finals_Lo"] = finals$Lo[1]
   
-  if (is.na(finals$prob[1])) finals$prob[1] = 0.5
-  
+  # simulate one-leg final
   final_outcome = rbinom(1, 1, finals$prob[1])
-  if (final_outcome == 1) {
-    results[r, "Champion"] = finals$Hi[1]
-  } else {
-    results[r, "Champion"] = finals$Lo[1]
-  }
+  alt_results[r, "Champion"] =
+    ifelse(final_outcome == 1, finals$Hi[1], finals$Lo[1])
 }
 
-# FINAL RESULTS 
-champions = results %>%
+# results
+champions = alt_results %>%
   dplyr::count(Champion, sort = TRUE) %>%
   dplyr::mutate(Prob = n / n_sims)
 
 champions
 
 ```
+
+```{r}
+champions_plot = champions %>%
+  ggplot(aes(x = reorder(Champion, Prob), y = Prob)) +
+  geom_col(fill = "#1f78b4") +
+  geom_text(aes(label = scales::percent(Prob, accuracy = 0.1)),
+            hjust = -0.1, size = 4) +
+  coord_flip(clip = "off") + 
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0, max(champions$Prob) * 1.15)) +
+  labs(
+    title = "Simulated Champions (10,000 Runs)",
+    subtitle = "2019–20 UEFA Champions League (BT + Poisson Model)",
+    x = "Team",
+    y = "Probability of Winning"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.title.y = element_text(vjust = 1),
+    axis.text.y = element_text(face = "bold"),
+    plot.margin = margin(10, 40, 10, 10)  
+  )
+
+ggsave("champions_plot.png", champions_plot, width = 8, height = 5, dpi = 300)
+
+champions_plot
+```
+
+```{r}
+sf_matchups = alt_results %>%
+  select(SF_Match1, SF_Match2) %>%
+  pivot_longer(everything(), values_to = "Matchup") %>%
+  count(Matchup, sort = TRUE) %>%
+  mutate(Prob = n / n_sims)
+
+sf_plot = sf_matchups %>%
+  slice_max(Prob, n = 6) %>%
+  ggplot(aes(x = reorder(Matchup, Prob), y = Prob)) +
+  geom_col(fill = "#1f78b4", width = 0.7) +
+  geom_text(
+    aes(label = percent(Prob, accuracy = 0.1)),
+    hjust = -0.1, size = 5
+  ) +
+  coord_flip(clip = "off") + 
+  scale_y_continuous(
+    labels = percent_format(accuracy = 1),
+    expand = expansion(mult = c(0, 0.15)) 
+  ) +
+  labs(
+    title = "Most Common Semifinal Matchups",
+    subtitle = "2019–20 UEFA Champions League Simulation (Bradley–Terry + Poisson)",
+    x = "Semifinal Matchup",
+    y = "Probability"
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(
+    plot.title = element_text(face = "bold", size = 18),
+    plot.subtitle = element_text(size = 14, color = "gray30"),
+    axis.text.y = element_text(face = "bold", size = 13),
+    axis.text.x = element_text(size = 12),
+    plot.margin = margin(10, 60, 10, 10)  # 👈 extra right margin
+  )
+
+sf_plot
+
+ggsave(
+  "ucl_semifinal_matchups.png",
+  sf_plot,
+  width = 11, height = 6, dpi = 300, limitsize = FALSE
+)
+
+
+final_matchups = alt_results %>%
+  mutate(
+    Final_Pair = paste(pmin(Finals_Hi, Finals_Lo),
+                       pmax(Finals_Hi, Finals_Lo),
+                       sep = " vs ")
+  ) %>%
+  count(Final_Pair, sort = TRUE) %>%
+  mutate(Prob = n / n_sims)
+
+final_plot = final_matchups %>%
+  slice_max(Prob, n = 6) %>%
+  ggplot(aes(x = reorder(Final_Pair, Prob), y = Prob)) +
+  geom_col(fill = "#e31a1c", width = 0.7) +
+  geom_text(
+    aes(label = percent(Prob, accuracy = 0.1)),
+    hjust = -0.1, size = 5
+  ) +
+  coord_flip(clip = "off") + 
+  scale_y_continuous(
+    labels = percent_format(accuracy = 1),
+    expand = expansion(mult = c(0, 0.15)) 
+  ) +
+  labs(
+    title = "Most Common Final Matchups",
+    subtitle = "2019–20 UEFA Champions League Simulation (Bradley–Terry + Poisson)",
+    x = "Final Matchup",
+    y = "Probability"
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(
+    plot.title = element_text(face = "bold", size = 18),
+    plot.subtitle = element_text(size = 14, color = "gray30"),
+    axis.text.y = element_text(face = "bold", size = 13),
+    axis.text.x = element_text(size = 12),
+    plot.margin = margin(10, 60, 10, 10)
+  )
+
+final_plot
+
+ggsave(
+  "ucl_final_matchups.png",
+  final_plot,
+  width = 11, height = 6, dpi = 300, limitsize = FALSE
+)
+
+```
+
 
 
 ## Endnotes {#endnotes}
