@@ -22,6 +22,7 @@ require(tidyverse, quietly = TRUE)
 # devtools::install_github("hturner/BradleyTerry2")
 require(BradleyTerry2, quietly = TRUE)
 library(scales)
+library(gt)
 #devtools::install_github("hrbrmstr/hrbrthemes", quiet = TRUE)
 #require(hrbrthemes, quietly = TRUE)
 ```
@@ -223,6 +224,11 @@ plot = ggplot2::ggplot(strongest, aes(Home, ability)) +
 plot
 ```
 
+To calculate Round of 16 results, it wouldn't make sense to only use domestic league coefficients because as we've seen, they are very susceptible to showing one strong team in a weak league. To fix this, for simulating the round of 16 results, we can use the group stage of the UCL to get BT scores for each of the teams that advanced. Domestic results still play a part in the strength, because a 6 game sample where each team didn't end up playing all the others doesn't give us reliable coefficients. So, our strategy was to weight UCL games heavier, and combine those games with domestic league games to get new BT scores which will help simulate the round of 16. 
+
+This code sets up our data where we get the domestic results + group stage results to fit into our BT model.
+
+
 ```{r}
 ucl = readr::read_csv('../data/raw/UEFA_Champions_League_2020_Results_RAW.csv', show_col_types = FALSE)
 ucl = ucl %>%  
@@ -234,6 +240,10 @@ ucl = ucl %>%
     Home = stringr::str_remove(Home, " [a-z]{2,3}$"),
     Away = str_remove(Away, "^[A-Za-z]{2,3}\\s+")
   )
+
+uefa_playoff_teams = ucl %>%
+  filter(Round %in% c("Round of 16", "Quarter-finals", "Semi-finals", "Final")) %>% select(Home, Away) %>%
+  unlist(use.names = FALSE) %>% unique() 
 
 ucl_group <- ucl %>%
   filter(Round == "Group stage", HomeGoals != AwayGoals)
@@ -278,35 +288,45 @@ bt_all <- bt_all %>%
 
 ```
 
-```{r}
-deg <- table(c(as.character(bt_all$home.team), as.character(bt_all$away.team)))
-refcat_combined <- names(sort(deg, decreasing = FALSE))[1]
 
-# 6) Fit the weighted BT model
-fit_combined <- BradleyTerry2::BTm(
+Fitting the BT model, we get:
+
+
+```{r}
+fit_all = BradleyTerry2::BTm(
   outcome = cbind(home.win, away.win),
   player1 = home.team,
   player2 = away.team,
-  refcat  = refcat_combined,
-  data    = bt_all,
-  weights = w
+  refcat = "Yenisey", 
+  data = bt_all
 )
 
-lambda_hat_combined <- BradleyTerry2::BTabilities(fit_combined) %>%
+lambda_hat_combined <- BradleyTerry2::BTabilities(fit_all) %>%
   as.data.frame() %>%
   tibble::rownames_to_column("team") %>%
   arrange(desc(ability))
 
+lambda_hat_combined = lambda_hat_combined %>%
+  filter(team %in% uefa_playoff_teams)
+
 lambda_hat_combined
 ```
 
+
+From the results we see that Juventus, Liverpool, and Barcelona are at the top of the ability category. These teams all had strong rosters and strong domestic results as well as group stage results. At the bottom, as expected we see teams less prestigious like Atalanta and Valencia. The standard error is all the same, which is because since all the teams didn't play each other for example Bayern never played Valencia, so we get disconnected graphs. For this round of 16 simulation, this doesn't make a huge deal.  
+
+
+
+
+
+Displaying our strengths in a graph:
 ```{r}
 
 lambda_hat_combined %>% 
   slice_max(ability, n = 10) %>%
   ggplot(aes(reorder(team, ability), ability)) +
   geom_col() + coord_flip() +
-  labs(title="Top BT Strengths (Domestic+UCL)", x=NULL, y="Ability (β)") +
+  labs(title="Top BT Strengths (Domestic+UCL Group Stage(Group match weights 8x))", x=NULL, y="Ability (β)") +
   theme_minimal()
 
 
@@ -322,43 +342,17 @@ et_scale  <- 0.75  # scoring slows in extra time
 set.seed(25)
 
 inv_logit <- function(x) 1/(1+exp(-x))
-# ---- normalize and safely match team names to lambda_hat$team ----
-normalize_name <- function(x) {
-  y <- iconv(x, from = "", to = "ASCII//TRANSLIT")
-  y <- tolower(y)
-  gsub("[^a-z0-9]+", "", y)
-}
 
 lambda_vec_raw <- setNames(lambda_hat_combined$ability, lambda_hat_combined$team)
-teams_raw  <- names(lambda_vec_raw)
-teams_norm <- normalize_name(teams_raw)
 
-get_lambda <- function(team) {
-  key <- normalize_name(team)
-  idx <- match(key, teams_norm)
-  if (!is.na(idx)) return(lambda_vec_raw[[teams_raw[idx]]])
-  d <- adist(key, teams_norm)
-  idx <- which.min(d)
-  if (length(idx) == 1 && is.finite(d[idx])) return(lambda_vec_raw[[teams_raw[idx]]])
-  0
-}
-
-# helpful preview to ensure aliases look right
-map_team <- function(team) {
-  key <- normalize_name(team)
-  idx <- match(key, teams_norm)
-  if (!is.na(idx)) {
-    data.frame(input=team, matched=teams_raw[idx], method="exact", stringsAsFactors=FALSE)
+get_lambda <- function(team) {#helper to get BT scores
+  if (!is.na(team) && team %in% names(lambda_vec_raw)) {
+    lambda_vec_raw[[team]]
   } else {
-    d <- adist(key, teams_norm); idx <- which.min(d)
-    data.frame(input=team, matched=teams_raw[idx], method=paste0("fuzzy:d=", d[idx]), stringsAsFactors=FALSE)
+    0
   }
 }
-```
 
-Some of the names of teams vary, so we have some normalization functions to keep the team names standard.
-
-```{r}
 r16_ties <- tibble::tribble(
   ~tie_id, ~home_first_leg,     ~away_first_leg,
   "R16-1", "Atalanta",          "Valencia",
@@ -371,27 +365,26 @@ r16_ties <- tibble::tribble(
   "R16-8", "Lyon",              "Juventus"
 )
 
-# show how each R16 name maps into your lambda_hat_combined list
-r16_name_map <- unique(rbind(
-  do.call(rbind, lapply(r16_ties$home_first_leg, map_team)),
-  do.call(rbind, lapply(r16_ties$away_first_leg, map_team))
-))
-print(r16_name_map, row.names = FALSE)
+
+r16_ties
+
 ```
 
 ```{r}
 sim_match_markov <- function(Home, Away, neutral=FALSE, allow_et=TRUE) {
   lamH <- get_lambda(Home); lamA <- get_lambda(Away)
-  r_tot <- total_gpm / 90   # total goal probability per minute
+  r_tot <- total_gpm / 90   # goal p per min
   s_home <- inv_logit(beta * (lamH - lamA) + ifelse(neutral, 0, hfa))
   pH <- r_tot * s_home
   pA <- r_tot * (1 - s_home)
-
+  #first 90 mins
   gH <- 0L; gA <- 0L
   for (t in 1:90) {
     u <- runif(1)
     if (u < pH) gH <- gH + 1L else if (u < pH + pA) gA <- gA + 1L
   }
+  
+  #extra time - scale p to show scoring in ET
   if (allow_et && gH == gA) {
     pH_et <- pH * et_scale; pA_et <- pA * et_scale
     for (t in 1:30) {
@@ -399,8 +392,8 @@ sim_match_markov <- function(Home, Away, neutral=FALSE, allow_et=TRUE) {
       if (u < pH_et) gH <- gH + 1L else if (u < pH_et + pA_et) gA <- gA + 1L
     }
     if (gH == gA) {
-      # Penalties with slight tilt by team strength
-      base <- 0.76; tilt <- 0.02
+      # Penalties 
+      base <- 0.76; tilt <- 0.02 #tilt nudges odds towards stronger team
       p_home <- max(min(base + tilt * tanh(lamH - lamA), 0.95), 0.55)
       p_away <- max(min(base - tilt * tanh(lamH - lamA), 0.95), 0.55)
       a <- b <- 0L
@@ -494,11 +487,52 @@ simulate_r16_mc <- function(N=5000, away_goals_rule=TRUE) {
 }
 ```
 
-```{r}
 
+From our games, we decided to run a markov simulation to get the probability a team will win out of N times, which also gets the average aggregate scores between two teams. This shows us in a real simulation how many times a team would be expected to win based on our BT strengths, and the matchup. 
+
+
+```{r}
 N <- 5000
 r16_results <- simulate_r16_mc(N=N, away_goals_rule=TRUE)
 print(r16_results)
+```
+
+From the Monte Carlo results, we see that:
+ - Atalanta is favored over Valencia slightly, reflecting Atalanta's win in real life. 
+ - Dortmund is heavily favored over PSG, which was wrong by the model, the BT including the group stage ranked PSG very low which was interesting
+ - Liverpool is heavily favored over Atletico Madrid, similar to real life where an upset happened and Atletico Madrid pulled out the victory
+ - Leipzig is favored 0.7 to 0.3 to Tottenham, aligning with real life
+ - Bayern is favored 0.8 to 0.2, aligning with real life where Bayern won
+ - Barcelona is favored 0.7 to 0.3 to Napoli, where Barcelona pulled out the win
+ - Manchester City was heavily favored against Real Madrid, 0.9 to 0.1 where Manchester City won in real life
+ - With the biggest upset, Lyon won in real life vs Juventus, which is 0.99 percent to win showing a large upset from our model's expectation
+
+
+```{r}
+
+r16_long <- r16_results %>%
+  mutate(matchup = paste(team_A, "vs", team_B)) %>%           # <-- create it
+  pivot_longer(
+    cols = c(mean_agg_A, mean_agg_B),
+    names_to = "which_team",
+    values_to = "mean_goals"
+  ) %>%
+  mutate(team = if_else(which_team == "mean_agg_A", team_A, team_B)) %>%
+  select(tie_id, matchup, team, mean_goals)
+
+
+
+# Plot: side-by-side bars per matchup
+ggplot(r16_long, aes(x = matchup, y = mean_goals, fill = team)) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+  geom_text(aes(label = round(mean_goals, 2)),
+            position = position_dodge(width = 0.7),
+            vjust = -0.25, size = 3) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.08))) +
+  labs(title = "R16: Average Goals by Team (Markov simulations)",
+       x = "Matchup", y = "Average Goals", fill = "Team") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 25, hjust = 1))
 
 ```
 
@@ -516,7 +550,7 @@ r16_long <- r16_results %>%
   mutate(prob_cap50 = pmin(prob, 0.5),
          label_full = sprintf("%.1f%%", 100 * prob))
 
-# Plot: two bars per tie, capped at 50%
+
 ggplot(r16_long, aes(x = tie_id, y = prob_cap50, fill = team)) +
   geom_col(position = position_dodge(width = 0.65), width = 0.6) +
   geom_text(aes(label = label_full),
@@ -535,150 +569,109 @@ ggplot(r16_long, aes(x = tie_id, y = prob_cap50, fill = team)) +
 
 ```
 
+
 ```{r}
 
-set.seed(25) 
+#helper to simulate match using markov function
+play_neutral <- function(A, B) {
+  out <- sim_match_markov(Home = A, Away = B, neutral = TRUE, allow_et = TRUE)
+  if (out$winner == "home") A else B
+}
 
-winners_stochastic <- r16_results %>% 
-  mutate(
-    A_wins = runif(n()) < p_adv_A,
-    winner = ifelse(A_wins, team_A, team_B),
-    A_wins = NULL
+simulate_tournament_once <- function(r16_results) {
+  winners_r16 <- r16_results %>%
+    arrange(tie_id) %>%                 
+    mutate(
+      A_wins = runif(n()) < p_adv_A,
+      winner = ifelse(A_wins, team_A, team_B)
+    )
+
+  qf1_A <- winners_r16$winner[winners_r16$tie_id == "R16-1"]
+  qf1_B <- winners_r16$winner[winners_r16$tie_id == "R16-2"]
+
+  qf2_A <- winners_r16$winner[winners_r16$tie_id == "R16-3"]
+  qf2_B <- winners_r16$winner[winners_r16$tie_id == "R16-4"]
+
+  qf3_A <- winners_r16$winner[winners_r16$tie_id == "R16-5"]
+  qf3_B <- winners_r16$winner[winners_r16$tie_id == "R16-6"]
+
+  qf4_A <- winners_r16$winner[winners_r16$tie_id == "R16-7"]
+  qf4_B <- winners_r16$winner[winners_r16$tie_id == "R16-8"]
+
+  qf1_w <- play_neutral(qf1_A, qf1_B)
+  qf2_w <- play_neutral(qf2_A, qf2_B)
+  qf3_w <- play_neutral(qf3_A, qf3_B)
+  qf4_w <- play_neutral(qf4_A, qf4_B)
+
+  
+  sf1_w <- play_neutral(qf1_w, qf2_w)
+  sf2_w <- play_neutral(qf3_w, qf4_w)
+
+  
+  champion <- play_neutral(sf1_w, sf2_w)
+
+  list(
+    champion = champion,
+    final_A = sf1_w,
+    final_B = sf2_w
+  )
+}
+
+simulate_tournament_field <- function(M = 5000, r16_results) {
+  champs   <- character(M)
+  finals_A <- character(M)
+  finals_B <- character(M)
+
+  for (m in seq_len(M)) {
+    sim <- simulate_tournament_once(r16_results)
+    champs[m]   <- sim$champion
+    finals_A[m] <- sim$final_A
+    finals_B[m] <- sim$final_B
+  }
+
+  sims <- tibble::tibble(
+    sim_id  = seq_len(M),
+    champion = champs,
+    final_A  = finals_A,
+    final_B  = finals_B
   )
 
-winners_stochastic
-```
+  
+  title_probs <- sims %>%
+    dplyr::count(champion, name = "titles") %>%
+    dplyr::mutate(
+      total_sims = sum(titles),
+      pct = titles / total_sims
+    ) %>%
+    dplyr::arrange(dplyr::desc(pct))
 
-```{r}
+  final_matchups <- sims %>%
+    dplyr::mutate(
+      team1 = pmin(final_A, final_B),
+      team2 = pmax(final_A, final_B)
+    ) %>%
+    dplyr::count(team1, team2, name = "n") %>%
+    dplyr::mutate(
+      total_sims = sum(n),
+      pct = n / total_sims
+    ) %>%
+    dplyr::arrange(dplyr::desc(pct))
 
-qf_ties <- tribble(
-  ~tie_id, ~team_A,               ~team_B,
-  "QF-1",  "Atalanta",            "Paris S-G",
-  "QF-2",  "RB Leipzig",          "Atletico Madrid",
-  "QF-3",  "Barcelona",           "Bayern Munich",
-  "QF-4",  "Manchester City",     "Lyon"
-)
-
-simulate_qf_mc <- function(N = 5000) {
-  purrr::map_dfr(seq_len(nrow(qf_ties)), function(i) {
-    A <- qf_ties$team_A[i]
-    B <- qf_ties$team_B[i]
-    winsA <- 0L
-    sumGoalsA <- 0L
-    sumGoalsB <- 0L
-
-    for (k in 1:N) {
-      out <- sim_match_markov(Home = A, Away = B, neutral = TRUE, allow_et = TRUE)
-      # out$winner is "home"/"away" per your function
-      the_winner <- if (out$winner == "home") A else B
-      if (the_winner == A) winsA <- winsA + 1L
-      sumGoalsA <- sumGoalsA + out$gH
-      sumGoalsB <- sumGoalsB + out$gA
-    }
-
-    pA <- winsA / N
-    tibble::tibble(
-      tie_id     = qf_ties$tie_id[i],
-      team_A     = A,
-      team_B     = B,
-      p_adv_A    = pA,
-      p_adv_B    = 1 - pA,
-      se_A       = sqrt(pA * (1 - pA) / N),
-      mean_goals_A = sumGoalsA / N,
-      mean_goals_B = sumGoalsB / N
-    )
-  }) %>% arrange(tie_id)
+  list(
+    title_probs    = title_probs,
+    final_matchups = final_matchups,
+    raw_sims       = sims
+  )
 }
 
 set.seed(25)
-N <- 5000
-qf_results <- simulate_qf_mc(N)
-print(qf_results)
+M <- 5000
+tourn_out <- simulate_tournament_field(M, r16_results)
 
-qf_stochastic <- qf_results %>%
-  mutate(
-    A_wins = runif(n()) < p_adv_A,
-    winner_stochastic = ifelse(A_wins, team_A, team_B)
-  ) %>%
-  select(tie_id, team_A, team_B, p_adv_A, p_adv_B, winner_stochastic)
-
-qf_stochastic
+tourn_out$title_probs       
+tourn_out$final_matchups    
 ```
 
-```{r}
-
-sf_ties <- tribble(
-  ~tie_id, ~team_A,           ~team_B,
-  "QF-1",  "Lyon",            "Bayern Munich",
-  "QF-2",  "RB Leipzig",      "Paris S-G",
-)
-
-simulate_round_mc <- function(ties_df, N = 5000) {
-  purrr::map_dfr(seq_len(nrow(ties_df)), function(i) {
-    A <- ties_df$team_A[i]
-    B <- ties_df$team_B[i]
-    winsA <- 0L
-    sumGoalsA <- 0L
-    sumGoalsB <- 0L
-
-    for (k in 1:N) {
-      out <- sim_match_markov(Home = A, Away = B, neutral = TRUE, allow_et = TRUE)
-      the_winner <- if (out$winner == "home") A else B
-      if (the_winner == A) winsA <- winsA + 1L
-      sumGoalsA <- sumGoalsA + out$gH
-      sumGoalsB <- sumGoalsB + out$gA
-    }
-
-    pA <- winsA / N
-    tibble::tibble(
-      tie_id        = ties_df$tie_id[i],
-      team_A        = A,
-      team_B        = B,
-      p_adv_A       = pA,
-      p_adv_B       = 1 - pA,
-      se_A          = sqrt(pA * (1 - pA) / N),
-      mean_goals_A  = sumGoalsA / N,
-      mean_goals_B  = sumGoalsB / N
-    )
-  }) %>% arrange(tie_id)
-}
-set.seed(25)           # reproducible
-sf_results <- simulate_round_mc(sf_ties, N = 5000)
-print(sf_results)
-
-set.seed(25)
-sf_stochastic <- sf_results %>%
-  mutate(
-    A_wins = runif(n()) < p_adv_A,
-    winner_stochastic = ifelse(A_wins, team_A, team_B),
-    A_wins = NULL
-  ) %>%
-  select(tie_id, team_A, team_B, p_adv_A, p_adv_B, winner_stochastic)
-
-sf_stochastic
-
-```
-
-```{r}
-final_ties <- tribble(
-  ~tie_id, ~team_A,           ~team_B,
-  "F-1",  "Paris S-G",            "Bayern Munich"
-)
-
-set.seed(25)           
-f_results <- simulate_round_mc(final_ties, N = 5000)
-print(f_results)
-
-f_stochastic <- f_results %>%
-  mutate(
-    A_wins = runif(n()) < p_adv_A,
-    winner_stochastic = ifelse(A_wins, team_A, team_B),
-    A_wins = NULL
-  ) %>%
-  select(tie_id, team_A, team_B, p_adv_A, p_adv_B, winner_stochastic)
-
-f_stochastic
-```
 
 ## Endnotes {#endnotes}
 
