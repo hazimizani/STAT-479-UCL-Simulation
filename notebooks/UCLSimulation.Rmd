@@ -171,7 +171,7 @@ fit <-
     player1 = home.team, player2 = away.team,
     refcat = "Yenisey",
     data = results)
-summary(fit)
+#summary(fit)
 ```
 
 ```{r}
@@ -204,11 +204,19 @@ ggsave("domestic.png", dpi = 300)
 ## Fitting Bradley-Terry Model based on Domestic League + UCL Group Stage and Round of 16 results
 
 ```{r}
-uefa_playoff_teams = uefa %>%
-  filter(Round %in% c("Quarter-finals", "Semi-finals", "Final")) %>% select(Home, Away) %>%
-  unlist(use.names = FALSE) %>% unique() 
+uefa = remove_xg(uefa)
+```
 
-uefa_playoff_teams 
+
+```{r}
+uefa = read_csv('../data/raw/UEFA_Champions_League_2020_Results_RAW.csv') 
+
+uefa_playoff_teams = c(
+  "Atalanta", "RB Leipzig", "Barcelona", "Manchester City",
+  "Lyon", "Paris S-G", "Atlético Madrid", "Bayern Munich"
+)
+
+uefa_playoff_teams
 ```
 
 ```{r}
@@ -217,12 +225,15 @@ uefa_group_ro16 = uefa %>% filter(Round %in% c("Group stage", "Round of 16"))
 uefa_group_ro16
 ```
 
+```{r}
+all_combined = all %>% rbind(uefa)
+
+
+head(all_combined)
+```
+
 
 ```{r}
-all_combined = bind_rows(
-  all %>% mutate(Competition = "Domestic"),
-  uefa_group_ro16 %>% mutate(Competition = "UCL")
-)
 
 no_ties_combined = all_combined %>%
   filter(HomeGoals != AwayGoals) %>%
@@ -234,30 +245,34 @@ unik_teams = sort(unique(c(no_ties_combined$Home, no_ties_combined$Away)))
 results_combined = no_ties_combined %>%
   rename(home.team = Home, away.team = Away) %>%
   group_by(home.team, away.team) %>%
-  summarise(home.win = sum(Home_Winner),
-            away.win = sum(Opp_Winner),
-            .groups = "drop") %>%
-  mutate(home.team = factor(home.team, levels = unik_teams),
-         away.team = factor(away.team, levels = unik_teams))
+  summarise(
+    home.win = sum(Home_Winner),
+    away.win = sum(Opp_Winner),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    home.team = factor(home.team, levels = unik_teams),
+    away.team = factor(away.team, levels = unik_teams)
+  )
 
-fit_all = BradleyTerry2::BTm(
+
+fit_all = BTm(
   outcome = cbind(home.win, away.win),
   player1 = home.team,
   player2 = away.team,
-  refcat = "Yenisey", 
+  refcat = "Yenisey",
   data = results_combined
 )
+
 
 ```
 
 ```{r}
-# extract team ability estimates from unified model
-combined_lambda_hat = as.data.frame(BradleyTerry2::BTabilities(fit_all))
-combined_lambda_hat = combined_lambda_hat %>%
-  rownames_to_column("team")
+combined_lambda_hat = as.data.frame(BradleyTerry2::BTabilities(fit_all)) %>%
+  rownames_to_column("team") %>%
+  arrange(desc(ability))
 
-# check
-head(combined_lambda_hat %>% arrange(desc(ability)))
+combined_lambda_hat
 
 ```
 
@@ -522,93 +537,83 @@ champions_plot
 ```
 
 ```{r}
+
 sf_matchups = alt_results %>%
   select(SF_Match1, SF_Match2) %>%
-  pivot_longer(everything(), values_to = "Matchup") %>%
+  pivot_longer(cols = everything(), values_to = "Matchup") %>%
   count(Matchup, sort = TRUE) %>%
   mutate(Prob = n / n_sims)
 
 sf_plot = sf_matchups %>%
-  slice_max(Prob, n = 6) %>%
   ggplot(aes(x = reorder(Matchup, Prob), y = Prob)) +
-  geom_col(fill = "#1f78b4", width = 0.7) +
+  geom_col(fill = "#1f78b4") +
   geom_text(
-    aes(label = percent(Prob, accuracy = 0.1)),
-    hjust = -0.1, size = 5
+    aes(label = scales::percent(Prob, accuracy = 0.1)),
+    hjust = -0.1, size = 4
   ) +
-  coord_flip(clip = "off") + 
+  coord_flip(clip = "off") +
   scale_y_continuous(
-    labels = percent_format(accuracy = 1),
-    expand = expansion(mult = c(0, 0.15)) 
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(0, max(sf_matchups$Prob) * 1.15)
   ) +
   labs(
-    title = "Most Common Semifinal Matchups",
+    title = "Most Common Semifinal Matchups (10,000 Runs)",
     subtitle = "2019–20 UEFA Champions League Simulation (Bradley–Terry + Poisson)",
     x = "Semifinal Matchup",
     y = "Probability"
   ) +
-  theme_minimal(base_size = 16) +
+  theme_minimal(base_size = 13) +
   theme(
-    plot.title = element_text(face = "bold", size = 18),
-    plot.subtitle = element_text(size = 14, color = "gray30"),
-    axis.text.y = element_text(face = "bold", size = 13),
-    axis.text.x = element_text(size = 12),
-    plot.margin = margin(10, 60, 10, 10)  # 👈 extra right margin
+    plot.title = element_text(face = "bold"),
+    axis.title.y = element_text(vjust = 1),
+    axis.text.y = element_text(face = "bold"),
+    plot.margin = margin(10, 40, 10, 10)
   )
 
+ggsave("ucl_semifinal_matchups.png", sf_plot, width = 8, height = 5, dpi = 300)
 sf_plot
 
-ggsave(
-  "ucl_semifinal_matchups.png",
-  sf_plot,
-  width = 11, height = 6, dpi = 300, limitsize = FALSE
-)
 
 
 final_matchups = alt_results %>%
   mutate(
-    Final_Pair = paste(pmin(Finals_Hi, Finals_Lo),
-                       pmax(Finals_Hi, Finals_Lo),
-                       sep = " vs ")
+    Final_Pair = paste(
+      pmin(Finals_Hi, Finals_Lo),
+      pmax(Finals_Hi, Finals_Lo),
+      sep = " vs "
+    )
   ) %>%
   count(Final_Pair, sort = TRUE) %>%
   mutate(Prob = n / n_sims)
 
 final_plot = final_matchups %>%
-  slice_max(Prob, n = 6) %>%
   ggplot(aes(x = reorder(Final_Pair, Prob), y = Prob)) +
-  geom_col(fill = "#e31a1c", width = 0.7) +
+  geom_col(fill = "#e31a1c") +
   geom_text(
-    aes(label = percent(Prob, accuracy = 0.1)),
-    hjust = -0.1, size = 5
+    aes(label = scales::percent(Prob, accuracy = 0.1)),
+    hjust = -0.1, size = 4
   ) +
-  coord_flip(clip = "off") + 
+  coord_flip(clip = "off") +
   scale_y_continuous(
-    labels = percent_format(accuracy = 1),
-    expand = expansion(mult = c(0, 0.15)) 
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(0, max(final_matchups$Prob) * 1.15)
   ) +
   labs(
-    title = "Most Common Final Matchups",
+    title = "Most Common Final Matchups (10,000 Runs)",
     subtitle = "2019–20 UEFA Champions League Simulation (Bradley–Terry + Poisson)",
     x = "Final Matchup",
     y = "Probability"
   ) +
-  theme_minimal(base_size = 16) +
+  theme_minimal(base_size = 13) +
   theme(
-    plot.title = element_text(face = "bold", size = 18),
-    plot.subtitle = element_text(size = 14, color = "gray30"),
-    axis.text.y = element_text(face = "bold", size = 13),
-    axis.text.x = element_text(size = 12),
-    plot.margin = margin(10, 60, 10, 10)
+    plot.title = element_text(face = "bold"),
+    axis.title.y = element_text(vjust = 1),
+    axis.text.y = element_text(face = "bold"),
+    plot.margin = margin(10, 40, 10, 10)
   )
 
+ggsave("ucl_final_matchups.png", final_plot, width = 8, height = 5, dpi = 300)
 final_plot
-
-ggsave(
-  "ucl_final_matchups.png",
-  final_plot,
-  width = 11, height = 6, dpi = 300, limitsize = FALSE
-)
 
 ```
 
